@@ -1,6 +1,5 @@
 from model import objectives
 from .clip_model import Transformer, QuickGELU, LayerNorm, build_CLIP_from_openai_pretrained, convert_weights
-import numpy as np
 import torch
 import torch.nn as nn
 from collections import OrderedDict
@@ -17,6 +16,24 @@ class IRRA(nn.Module):
         self.embed_dim = base_cfg['embed_dim']
 
         self.logit_scale = torch.ones([]) * (1 / args.temperature) 
+
+        # optional decoupled heads for alignment and identity tasks
+        self.use_decouple = getattr(args, 'decouple', False)
+        if self.use_decouple:
+            def make_mlp(in_dim, out_dim, layers):
+                modules = []
+                hidden = out_dim
+                for i in range(layers):
+                    modules.append(nn.Linear(in_dim if i == 0 else hidden, hidden))
+                    if i < layers - 1:
+                        modules += [QuickGELU(), LayerNorm(hidden)]
+                return nn.Sequential(*modules) if modules else nn.Identity()
+
+            
+
+            # identity heads (separate per modality)
+            self.id_img_head = make_mlp(self.embed_dim, self.embed_dim, args.id_head_layers)
+            self.id_txt_head = make_mlp(self.embed_dim, self.embed_dim, args.id_head_layers)
 
         if 'id' in args.loss_names:
             self.classifier = nn.Linear(self.embed_dim, self.num_classes)
@@ -80,12 +97,16 @@ class IRRA(nn.Module):
 
     def encode_image(self, image):
         x = self.base_model.encode_image(image)
-        return x[:, 0, :].float()
+        i_feats = x[:, 0, :].float()
+        # Revert to original inference: directly use backbone features
+        return i_feats
         # return x.float() # for CLIP ResNet visual model
 
     def encode_text(self, text):
         x = self.base_model.encode_text(text)
-        return x[torch.arange(x.shape[0]), text.argmax(dim=-1)].float()
+        t_feats = x[torch.arange(x.shape[0]), text.argmax(dim=-1)].float()
+        # Revert to original inference: directly use backbone features
+        return t_feats
 
     def forward(self, batch):
         ret = dict()
@@ -97,17 +118,20 @@ class IRRA(nn.Module):
         # i_feats = image_feats.float() # for CLIP ResNet visual model
         t_feats = text_feats[torch.arange(text_feats.shape[0]), caption_ids.argmax(dim=-1)].float()
 
+        # Use original features for both alignment and ID tasks (no decoupled heads)
+        ai_feats, at_feats = i_feats, t_feats
+
         logit_scale = self.logit_scale
         ret.update({'temperature': 1 / logit_scale})
 
         if 'itc' in self.current_task:
-            ret.update({'itc_loss':objectives.compute_itc(i_feats, t_feats, logit_scale)})
+            ret.update({'itc_loss': objectives.compute_itc(ai_feats, at_feats, logit_scale)})
         
         if 'sdm' in self.current_task:
-            ret.update({'sdm_loss':objectives.compute_sdm(i_feats, t_feats, batch['pids'], logit_scale)})
+            ret.update({'sdm_loss': objectives.compute_sdm(ai_feats, at_feats, batch['pids'], logit_scale)})
 
         if 'cmpm' in self.current_task:
-            ret.update({'cmpm_loss':objectives.compute_cmpm(i_feats, t_feats, batch['pids'])})
+            ret.update({'cmpm_loss': objectives.compute_cmpm(ai_feats, at_feats, batch['pids'])})
         
         if 'id' in self.current_task:
             image_logits = self.classifier(i_feats.half()).float()

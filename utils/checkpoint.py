@@ -40,9 +40,42 @@ class Checkpointer:
             data["scheduler"] = self.scheduler.state_dict()
         data.update(kwargs)
 
+        os.makedirs(self.save_dir, exist_ok=True)
         save_file = os.path.join(self.save_dir, "{}.pth".format(name))
+        tmp_file = save_file + ".tmp"
         self.logger.info("Saving checkpoint to {}".format(save_file))
-        torch.save(data, save_file)
+
+        # robust save: write to temp, flush, then atomic rename; retry a few times
+        last_err = None
+        for attempt in range(3):
+            try:
+                # use a lower pickle protocol to improve compatibility (optional)
+                torch.save(data, tmp_file)
+                # ensure data is flushed to disk
+                with open(tmp_file, 'rb') as f:
+                    os.fsync(f.fileno())
+                os.replace(tmp_file, save_file)  # atomic on POSIX
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                self.logger.warning(f"Checkpoint save attempt {attempt+1} failed: {e}")
+                # clean temp file if exists
+                try:
+                    if os.path.exists(tmp_file):
+                        os.remove(tmp_file)
+                except Exception:
+                    pass
+                continue
+        if last_err is not None:
+            # try legacy serialization without zip container
+            try:
+                torch.save(data, save_file, _use_new_zipfile_serialization=False)
+                last_err = None
+            except Exception as e:
+                last_err = e
+                self.logger.error(f"Legacy checkpoint save failed: {e}")
+                raise
 
     def load(self, f=None):
         if not f:

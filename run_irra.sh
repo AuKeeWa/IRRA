@@ -1,7 +1,8 @@
 #!/bin/bash
-DATASET_NAME="CUHK-PEDES"
+# DATASET_NAME="CUHK-PEDES"
+DATASET_NAME="ICFG-PEDES"
 
-CUDA_VISIBLE_DEVICES=0 \
+CUDA_VISIBLE_DEVICES=4 \
 python train.py \
 --name irra \
 --img_aug \

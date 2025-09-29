@@ -29,6 +29,12 @@ def get_args():
     parser.add_argument("--loss_names", default='sdm+id+mlm', help="which loss to use ['mlm', 'cmpm', 'id', 'itc', 'sdm']")
     parser.add_argument("--mlm_loss_weight", type=float, default=1.0, help="mlm loss weight")
     parser.add_argument("--id_loss_weight", type=float, default=1.0, help="id loss weight")
+    # decoupling options
+    parser.add_argument("--decouple", default=False, action='store_true', help="enable decoupled heads: alignment/id tasks")
+    parser.add_argument("--align_head_layers", type=int, default=1, help="MLP layers for alignment head (per modality)")
+    parser.add_argument("--id_head_layers", type=int, default=1, help="MLP layers for identity head (per modality)")
+    parser.add_argument("--inference_fusion", type=str, default="align", choices=["align", "id", "concat"], help="which feature to use at inference")
+    parser.add_argument("--fusion_alpha", type=float, default=0.6, help="weight for alignment feature when inference_fusion=concat; id weight is 1-alpha")
     
     ######################## vison trainsformer settings ########################
     parser.add_argument("--img_size", type=tuple, default=(384, 128))
