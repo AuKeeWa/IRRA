@@ -35,6 +35,11 @@ class IRRA(nn.Module):
             self.id_img_head = make_mlp(self.embed_dim, self.embed_dim, args.id_head_layers)
             self.id_txt_head = make_mlp(self.embed_dim, self.embed_dim, args.id_head_layers)
 
+            # predictor heads for reconstruction constraint - 第二个block
+            id_pred_layers = getattr(args, 'id_pred_layers', 1)
+            self.id_pred_img = make_mlp(self.embed_dim, self.embed_dim, id_pred_layers)
+            self.id_pred_txt = make_mlp(self.embed_dim, self.embed_dim, id_pred_layers)
+
         if 'id' in args.loss_names:
             self.classifier = nn.Linear(self.embed_dim, self.num_classes)
             nn.init.normal_(self.classifier.weight.data, std=0.001)
@@ -111,6 +116,9 @@ class IRRA(nn.Module):
     def forward(self, batch):
         ret = dict()
 
+        # print(f"Current task: {self.current_task}")
+        # print(f"use_decouple: {getattr(self, 'use_decouple', False)}")
+        
         images = batch['images']
         caption_ids = batch['caption_ids']
         image_feats, text_feats = self.base_model(images, caption_ids)
@@ -134,8 +142,57 @@ class IRRA(nn.Module):
             ret.update({'cmpm_loss': objectives.compute_cmpm(ai_feats, at_feats, batch['pids'])})
         
         if 'id' in self.current_task:
-            image_logits = self.classifier(i_feats.half()).float()
-            text_logits = self.classifier(t_feats.half()).float()
+            # 两段式ID分支：第一段做身份判别，第二段做重建约束
+            if getattr(self, 'use_decouple', False):
+                # 第一个block：backbone -> ID空间 (用于身份判别)
+                id_i_feats = self.id_img_head(i_feats)
+                id_t_feats = self.id_txt_head(t_feats)
+                
+                # 第二个block：ID空间 -> 重建空间 (用于语义约束)
+                pred_i_feats = self.id_pred_img(id_i_feats)
+                pred_t_feats = self.id_pred_txt(id_t_feats)
+                
+                # 重建约束：确保ID空间不偏离原始语义空间太远
+                # 使用detach()确保梯度只更新ID分支，不影响骨干网络
+                reg_weight = getattr(self.args, 'reg_loss_weight', 0.05)
+
+                # 选择不同的约束方式
+                reg_type = getattr(self.args, 'reg_loss_type', 'mse')  # mse, cosine, huber
+                
+                if reg_type == 'cosine':
+                    # 余弦相似度损失（更温和）
+                    reg_loss_img = 1 - torch.nn.functional.cosine_similarity(
+                        pred_i_feats, i_feats.detach(), dim=-1).mean()
+                    reg_loss_txt = 1 - torch.nn.functional.cosine_similarity(
+                        pred_t_feats, t_feats.detach(), dim=-1).mean()
+                    reg_loss = reg_loss_img + reg_loss_txt
+                elif reg_type == 'huber':
+                    # Huber损失（鲁棒性更好）
+                    reg_loss = torch.nn.functional.huber_loss(
+                        torch.nn.functional.normalize(pred_i_feats, dim=-1),
+                        torch.nn.functional.normalize(i_feats.detach(), dim=-1),
+                        delta=0.1
+                    ) + torch.nn.functional.huber_loss(
+                        torch.nn.functional.normalize(pred_t_feats, dim=-1),
+                        torch.nn.functional.normalize(t_feats.detach(), dim=-1),
+                        delta=0.1
+                    )
+                else:  # 默认MSE
+                    backbone_i_norm = torch.nn.functional.normalize(i_feats.detach(), dim=-1)
+                    backbone_t_norm = torch.nn.functional.normalize(t_feats.detach(), dim=-1)
+                    pred_i_norm = torch.nn.functional.normalize(pred_i_feats, dim=-1)
+                    pred_t_norm = torch.nn.functional.normalize(pred_t_feats, dim=-1)
+                    
+                    reg_loss = torch.nn.functional.mse_loss(pred_i_norm, backbone_i_norm) + \
+                            torch.nn.functional.mse_loss(pred_t_norm, backbone_t_norm)
+                ret.update({'reg_loss': reg_loss * reg_weight})
+            else:
+                # 原始方式：直接使用骨干特征
+                id_i_feats, id_t_feats = i_feats, t_feats
+
+            # ID分类损失
+            image_logits = self.classifier(id_i_feats)  # 使用ID空间特征
+            text_logits = self.classifier(id_t_feats)   # 使用ID空间特征
             ret.update({'id_loss':objectives.compute_id(image_logits, text_logits, batch['pids'])*self.args.id_loss_weight})
 
             image_pred = torch.argmax(image_logits, dim=1)
@@ -170,5 +227,5 @@ class IRRA(nn.Module):
 def build_model(args, num_classes=11003):
     model = IRRA(args, num_classes)
     # covert model to fp16
-    convert_weights(model)
+    # convert_weights(model)
     return model

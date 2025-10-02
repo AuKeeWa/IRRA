@@ -28,6 +28,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         "itc_loss": AverageMeter(),
         "id_loss": AverageMeter(),
         "mlm_loss": AverageMeter(),
+        "reg_loss": AverageMeter(), 
         "img_acc": AverageMeter(),
         "txt_acc": AverageMeter(),
         "mlm_acc": AverageMeter()
@@ -60,6 +61,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
             meters['img_acc'].update(ret.get('img_acc', 0), batch_size)
             meters['txt_acc'].update(ret.get('txt_acc', 0), batch_size)
             meters['mlm_acc'].update(ret.get('mlm_acc', 0), 1)
+            meters['reg_loss'].update(ret.get('reg_loss', 0), batch_size)  # ← 添加这一行
 
             optimizer.zero_grad()
             total_loss.backward()
