@@ -31,6 +31,7 @@ def get_args():
     parser.add_argument("--id_loss_weight", type=float, default=1.0, help="id loss weight")
     # decoupling options
     parser.add_argument("--decouple", default=False, action='store_true', help="enable decoupled heads: alignment/id tasks")
+    parser.add_argument("--id_head_type", type=str, default="mlp", choices=["mlp", "transformer", "hybrid"], help="architecture type for ID head: mlp (simple), transformer (powerful), hybrid (balanced)")
     parser.add_argument("--align_head_layers", type=int, default=1, help="MLP layers for alignment head (per modality)")
     parser.add_argument("--id_head_layers", type=int, default=1, help="MLP layers for identity head (per modality)")
     parser.add_argument("--id_pred_layers", type=int, default=1, help="MLP layers for identity predictor head (per modality)")

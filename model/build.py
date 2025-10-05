@@ -29,11 +29,68 @@ class IRRA(nn.Module):
                         modules += [QuickGELU(), LayerNorm(hidden)]
                 return nn.Sequential(*modules) if modules else nn.Identity()
 
-            
+            # 选择ID头的架构类型
+            id_head_type = getattr(args, 'id_head_type', 'mlp')  # mlp, transformer, hybrid
 
-            # identity heads (separate per modality)
-            self.id_img_head = make_mlp(self.embed_dim, self.embed_dim, args.id_head_layers)
-            self.id_txt_head = make_mlp(self.embed_dim, self.embed_dim, args.id_head_layers)
+            if id_head_type == 'transformer':
+                # 使用Transformer Block作为ID头（更强的表达能力）
+                print(f"Using Transformer ID head with {args.id_head_layers} layers")
+                self.id_img_head = Transformer(
+                    width=self.embed_dim,
+                    layers=args.id_head_layers,
+                    heads=self.embed_dim // 64
+                )
+                self.id_txt_head = Transformer(
+                    width=self.embed_dim,
+                    layers=args.id_head_layers,
+                    heads=self.embed_dim // 64
+                )
+                self.use_transformer_head = True
+
+            elif id_head_type == 'hybrid':
+                # 混合架构：Self-Attention + FFN (类似Transformer Block但更轻量)
+                print(f"Using Hybrid ID head")
+
+                class HybridIDHead(nn.Module):
+                    def __init__(self, embed_dim, num_heads=8):
+                        super().__init__()
+                        self.ln1 = LayerNorm(embed_dim)
+                        self.self_attn = nn.MultiheadAttention(
+                            embed_dim, num_heads, batch_first=True
+                        )
+                        self.ln2 = LayerNorm(embed_dim)
+                        self.mlp = nn.Sequential(
+                            nn.Linear(embed_dim, embed_dim * 4),
+                            QuickGELU(),
+                            nn.Linear(embed_dim * 4, embed_dim)
+                        )
+
+                    def forward(self, x):
+                        # x: [batch, embed_dim]
+                        x = x.unsqueeze(1)  # [batch, 1, embed_dim]
+                        # Self-attention with residual
+                        attn_out = self.self_attn(
+                            self.ln1(x), self.ln1(x), self.ln1(x), need_weights=False
+                        )[0]
+                        x = x + attn_out
+                        # FFN with residual
+                        x = x + self.mlp(self.ln2(x))
+                        return x.squeeze(1)  # [batch, embed_dim]
+
+                self.id_img_head = HybridIDHead(self.embed_dim)
+                self.id_txt_head = HybridIDHead(self.embed_dim)
+                self.use_transformer_head = False
+
+            else:
+                # 默认MLP (保持向后兼容)
+                print(f"Using MLP ID head with {args.id_head_layers} layers")
+                self.id_img_head = make_mlp(self.embed_dim, self.embed_dim, args.id_head_layers)
+                self.id_txt_head = make_mlp(self.embed_dim, self.embed_dim, args.id_head_layers)
+                self.use_transformer_head = False
+
+            # # identity heads (separate per modality)
+            # self.id_img_head = make_mlp(self.embed_dim, self.embed_dim, args.id_head_layers)
+            # self.id_txt_head = make_mlp(self.embed_dim, self.embed_dim, args.id_head_layers)
 
             # predictor heads for reconstruction constraint - 第二个block
             id_pred_layers = getattr(args, 'id_pred_layers', 1)
@@ -145,8 +202,14 @@ class IRRA(nn.Module):
             # 两段式ID分支：第一段做身份判别，第二段做重建约束
             if getattr(self, 'use_decouple', False):
                 # 第一个block：backbone -> ID空间 (用于身份判别)
-                id_i_feats = self.id_img_head(i_feats)
-                id_t_feats = self.id_txt_head(t_feats)
+                if getattr(self, 'use_transformer_head', False):
+                    # Transformer需要序列输入 [batch, seq_len, embed_dim]
+                    id_i_feats = self.id_img_head(i_feats.unsqueeze(1).permute(1, 0, 2)).permute(1, 0, 2).squeeze(1)
+                    id_t_feats = self.id_txt_head(t_feats.unsqueeze(1).permute(1, 0, 2)).permute(1, 0, 2).squeeze(1)
+                else:
+                    # MLP和Hybrid直接处理 [batch, embed_dim]
+                    id_i_feats = self.id_img_head(i_feats)
+                    id_t_feats = self.id_txt_head(t_feats)
                 
                 # 第二个block：ID空间 -> 重建空间 (用于语义约束)
                 pred_i_feats = self.id_pred_img(id_i_feats)
