@@ -27,8 +27,18 @@ class IRRA(nn.Module):
                     modules.append(nn.Linear(in_dim if i == 0 else hidden, hidden))
                     if i < layers - 1:
                         modules += [QuickGELU(), LayerNorm(hidden)]
-                return nn.Sequential(*modules) if modules else nn.Identity()
-
+                mlp = nn.Sequential(*modules) if modules else nn.Identity()
+                # 添加初始化
+                for m in mlp.modules():
+                    if isinstance(m, nn.Linear):
+                        nn.init.normal_(m.weight, std=0.02)  # CLIP使用的标准差
+                        if m.bias is not None:
+                            nn.init.constant_(m.bias, 0.0)
+                    elif isinstance(m, LayerNorm):
+                        nn.init.constant_(m.weight, 1.0)
+                        nn.init.constant_(m.bias, 0.0)
+                return mlp
+            
             # 选择ID头的架构类型
             id_head_type = getattr(args, 'id_head_type', 'mlp')  # mlp, transformer, hybrid
 

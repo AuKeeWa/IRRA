@@ -20,7 +20,7 @@ def setup_logger(name, save_dir, if_train, distributed_rank=0):
 
     if not op.exists(save_dir):
         print(f"{save_dir} is not exists, create given directory")
-        os.makedirs(save_dir)
+        os.makedirs(save_dir, exist_ok=True)
     if if_train:
         fh = logging.FileHandler(os.path.join(save_dir, "train_log.txt"), mode='w')
     else:
