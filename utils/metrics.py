@@ -28,12 +28,15 @@ def rank(similarity, q_pids, g_pids, max_rank=10, get_mAP=True):
     num_rel = matches.sum(1)  # q
     tmp_cmc = matches.cumsum(1)  # q * k
 
+    # 修复 mINP 计算中 num_rel 可能为0的情况
+    num_rel_clamp = torch.max(num_rel, torch.tensor(1.0))
+
     inp = [tmp_cmc[i][match_row.nonzero()[-1]] / (match_row.nonzero()[-1] + 1.) for i, match_row in enumerate(matches)]
     mINP = torch.cat(inp).mean() * 100
 
     tmp_cmc = [tmp_cmc[:, i] / (i + 1.0) for i in range(tmp_cmc.shape[1])]
     tmp_cmc = torch.stack(tmp_cmc, 1) * matches
-    AP = tmp_cmc.sum(1) / num_rel  # q
+    AP = tmp_cmc.sum(1) / num_rel_clamp  # q (使用 clamp 避免除以0)
     mAP = AP.mean() * 100
 
     return all_cmc, mAP, mINP, indices
@@ -70,14 +73,18 @@ class Evaluator():
         gids = torch.cat(gids, 0)
         gfeats = torch.cat(gfeats, 0)
 
+        # 注意：encode_text/image 已经返回了归一化特征
+        
+
         return qfeats, gfeats, qids, gids
     
     def eval(self, model, i2t_metric=False):
 
         qfeats, gfeats, qids, gids = self._compute_embedding(model)
 
-        qfeats = F.normalize(qfeats, p=2, dim=1) # text features
-        gfeats = F.normalize(gfeats, p=2, dim=1) # image features
+        # 特征已经在 model.encode_text/image 中归一化
+        # qfeats = F.normalize(qfeats, p=2, dim=1) # text features
+        # gfeats = F.normalize(gfeats, p=2, dim=1) # image features
 
         similarity = qfeats @ gfeats.t()
 
@@ -98,4 +105,5 @@ class Evaluator():
         table.custom_format["mINP"] = lambda f, v: f"{v:.3f}"
         self.logger.info('\n' + str(table))
         
-        return t2i_cmc[0]
+        # return t2i_cmc[0]
+        return t2i_cmc[0], t2i_mAP, t2i_mINP

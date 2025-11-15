@@ -36,7 +36,6 @@ def compute_sdm(image_fetures, text_fetures, pid, logit_scale, image_id=None, fa
     i2t_loss = i2t_pred * (F.log_softmax(image_proj_text, dim=1) - torch.log(labels_distribute + epsilon))
     t2i_pred = F.softmax(text_proj_image, dim=1)
     t2i_loss = t2i_pred * (F.log_softmax(text_proj_image, dim=1) - torch.log(labels_distribute + epsilon))
-
     loss = torch.mean(torch.sum(i2t_loss, dim=1)) + torch.mean(torch.sum(t2i_loss, dim=1))
 
     return loss
@@ -44,7 +43,8 @@ def compute_sdm(image_fetures, text_fetures, pid, logit_scale, image_id=None, fa
 
 def compute_mlm(scores, labels):
     ce = nn.CrossEntropyLoss(ignore_index=0)
-    return ce(scores, labels)
+    # return ce(scores, labels)
+    return F.cross_entropy(scores, labels)
 
 
 def compute_itc(image_features, text_features, logit_scale):
@@ -75,7 +75,9 @@ def compute_id(image_logits, text_logits, labels):
     """
     Instance loss proposed at http://arxiv.org/abs/1711.05535
     """
-    criterion = nn.CrossEntropyLoss(reduction="mean")
+    criterion = nn.CrossEntropyLoss(reduction="mean", label_smoothing=0.1)
+    # criterion = nn.CrossEntropyLoss(reduction="mean", label_smoothing=0.05)
+    # criterion = nn.CrossEntropyLoss(reduction="mean", label_smoothing=0.15)
 
     loss = criterion(image_logits, labels) + criterion(text_logits, labels)
     
@@ -117,3 +119,73 @@ def compute_cmpm(image_embeddings, text_embeddings, labels, epsilon=1e-8):
 
     return cmpm_loss
 
+
+
+def compute_triplet(image_features, text_features, labels, margin=0.3):
+    """
+    (推荐) 矢量化 (Vectorized) 的跨模态 Batch-Hard Triplet Loss
+    
+    Args:
+        image_features: Image embeddings [batch_size, embed_dim]
+        text_features: Text embeddings [batch_size, embed_dim]
+        labels: Identity labels [batch_size]
+        margin: Margin for triplet loss (default: 0.3)
+    
+    Returns:
+        triplet_loss: Combined image-to-text and text-to-image triplet loss
+    """
+    # 归一化特征
+    image_norm = image_features / image_features.norm(dim=1, keepdim=True)
+    text_norm = text_features / text_features.norm(dim=1, keepdim=True)
+    
+    # 计算成对的余弦距离矩阵
+    # (距离 = 1 - 相似度), 范围 [0, 2]
+    # 距离越小 = 越相似
+    i2t_dist = 1 - image_norm @ text_norm.t()  # [B, B]
+    t2i_dist = 1 - text_norm @ image_norm.t()  # [B, B]
+    
+    # --- 构造掩码 ---
+    labels = labels.reshape(-1, 1)
+    # pos_mask[i, j] = 1 (如果 i 和 j 是相同 ID)
+    pos_mask = (labels == labels.t()).float()
+    # neg_mask[i, j] = 1 (如果 i 和 j 是不同 ID)
+    neg_mask = (labels != labels.t()).float()
+    
+    # --- 1. Image-to-Text Triplet Loss (Anchor=Image, P/N=Text) ---
+    
+    # 找到最难的正样本 (Hardest Positive)
+    # 我们想要距离最远 (max) 的正样本
+    # 将负样本的距离设置为一个非常小的值，使其在 max() 中被忽略
+    hardest_pos_i2t = torch.max(i2t_dist * pos_mask, dim=1)[0] # [B]
+    
+    # 找到最难的负样本 (Hardest Negative)
+    # 我们想要距离最近 (min) 的负样本
+    # 将正样本的距离设置为一个非常大的值，使其在 min() 中被忽略
+    hardest_neg_i2t = torch.min(i2t_dist + 1e5 * pos_mask, dim=1)[0] # [B]
+    
+    # 计算损失
+    i2t_triplet_loss = torch.clamp(hardest_pos_i2t - hardest_neg_i2t + margin, min=0)
+    
+    # --- 2. Text-to-Image Triplet Loss (Anchor=Text, P/N=Image) ---
+    
+    # 找到最难的正样本 (Hardest Positive)
+    hardest_pos_t2i = torch.max(t2i_dist * pos_mask, dim=1)[0] # [B]
+    
+    # 找到最难的负样本 (Hardest Negative)
+    hardest_neg_t2i = torch.min(t2i_dist + 1e5 * pos_mask, dim=1)[0] # [B]
+    
+    # 计算损失
+    t2i_triplet_loss = torch.clamp(hardest_pos_t2i - hardest_neg_t2i + margin, min=0)
+    
+    # --- 3. 合并损失 ---
+    # 对所有有效的（即损失 > 0）三元组取平均
+    triplet_loss = (i2t_triplet_loss + t2i_triplet_loss) / 2.0
+    
+    # (可选，但推荐) 只对 > 0 的损失取平均
+    valid_triplets = torch.sum((triplet_loss > 1e-7).float())
+    if valid_triplets > 0:
+        triplet_loss = torch.sum(triplet_loss) / valid_triplets
+    else:
+        triplet_loss = torch.mean(triplet_loss) # 保持梯度图
+        
+    return triplet_loss

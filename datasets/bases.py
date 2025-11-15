@@ -9,6 +9,7 @@ from prettytable import PrettyTable
 import random
 import regex as re
 import copy
+import numpy as np  # 新增导入
 
 
 class BaseDataset(object):
@@ -135,12 +136,13 @@ class ImageTextMLMDataset(Dataset):
                  dataset,
                  transform=None,
                  text_length: int = 77,
-                 truncate: bool = True):
+                 truncate: bool = True,
+                 txt_aug: bool = False):  # 新增参数
         self.dataset = dataset
         self.transform = transform
         self.text_length = text_length
         self.truncate = truncate
-
+        self.txt_aug = txt_aug  # 新增
         self.tokenizer = SimpleTokenizer()
 
     def __len__(self):
@@ -151,22 +153,50 @@ class ImageTextMLMDataset(Dataset):
         img = read_image(img_path)
         if self.transform is not None:
             img = self.transform(img)
-        
+        # 1. 原始 caption_ids（用于对比学习）
         caption_tokens = tokenize(caption, tokenizer=self.tokenizer, text_length=self.text_length, truncate=self.truncate)
-
+        # 2. 生成 MLM tokens 和 labels
         mlm_tokens, mlm_labels = self._build_random_masked_tokens_and_labels(caption_tokens.cpu().numpy())
 
+        # 3. 【新增】对 mlm_tokens 应用文本增强
+        if self.txt_aug:
+            mlm_tokens = self.txt_data_aug(mlm_tokens.cpu().numpy())
+        
         ret = {
             'pids': pid,
             'image_ids': image_id,
             'images': img,
-            'caption_ids': caption_tokens,
-            'mlm_ids': mlm_tokens,
+            'caption_ids': caption_tokens,# 保持原始 caption_ids 不变
+            'mlm_ids': mlm_tokens,  # MLM + txt_aug 增强
             'mlm_labels': mlm_labels
         }
 
         return ret
 
+    def txt_data_aug(self, tokens):
+        """文本数据增强（从 ICL 移植）"""
+        mask = self.tokenizer.encoder["<|mask|>"]
+        token_range = list(range(1, len(self.tokenizer.encoder)-3))
+        new_tokens = np.zeros_like(tokens)
+        aug_tokens = []
+        
+        for i, token in enumerate(tokens):
+            if 0 < token < 49405:
+                prob = random.random()
+                if prob < 0.2:  # 20% 增强概率
+                    prob /= 0.2
+                    if prob < 0.6:
+                        aug_tokens.append(mask)
+                    elif prob < 0.8:
+                        aug_tokens.append(random.choice(token_range))
+                    # else: 删除
+                else:
+                    aug_tokens.append(tokens[i])
+            else:
+                aug_tokens.append(tokens[i])
+        
+        new_tokens[0:len(aug_tokens)] = np.array(aug_tokens)
+        return torch.tensor(new_tokens)
     def _build_random_masked_tokens_and_labels(self, tokens):
         """
         Masking some random tokens for Language Model task with probabilities as in the original BERT paper.

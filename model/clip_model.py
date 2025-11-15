@@ -275,7 +275,14 @@ class VisionTransformer(nn.Module):
 
         scale = width ** -0.5 # 1/sqrt(768)
         self.class_embedding = nn.Parameter(scale * torch.randn(width))
+
+        # self.class_embedding_inst = nn.Parameter(scale * torch.randn(width)) # 实例 CLS
+        # self.class_embedding_id = nn.Parameter(scale * torch.randn(width))   # 身份 CLS
+
         self.positional_embedding = nn.Parameter(scale * torch.randn(num_patches + 1, width))
+        # 位置编码需要为 (num_patches + 2) 个 token 准备
+        # self.positional_embedding = nn.Parameter(scale * torch.randn(num_patches + 2, width))
+
         self.ln_pre = LayerNorm(width)
 
         self.transformer = Transformer(width, layers, heads)
@@ -288,8 +295,18 @@ class VisionTransformer(nn.Module):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
+        
+        
         x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
-        x = x + self.positional_embedding.to(x.dtype)
+        # 准备两个 CLS token 并扩展 batch 维度
+        # 我们把 实例(Inst) 放 index 0, 身份(ID) 放 index 1
+        # cls_inst_token = self.class_embedding_inst.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device)
+        # cls_id_token = self.class_embedding_id.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device)
+        
+        # # 拼接：[CLS_Inst, CLS_ID, patch1, patch2, ...]
+        # x = torch.cat([cls_inst_token, cls_id_token, x], dim=1)  # shape = [*, grid ** 2 + 2, width]
+        
+        x = x + self.positional_embedding.to(x.dtype) # positional_embedding 是 (num_patches + 2, width)
         x = self.ln_pre(x)
 
         x = x.permute(1, 0, 2)  # NLD -> LND
@@ -297,7 +314,7 @@ class VisionTransformer(nn.Module):
         x = x.permute(1, 0, 2)  # LND -> NLD
 
         # x = self.ln_post(x[:, 0, :])
-        x = self.ln_post(x)
+        x = self.ln_post(x) # 保持不变, [*, grid ** 2 + 2, width]
 
         if self.proj is not None:
             x = x @ self.proj
@@ -420,7 +437,7 @@ class CLIP(nn.Module):
         # x.shape = [batch_size, n_ctx, transformer.width]
         # take features from the eot embedding (eot_token is the highest number in each sequence)
         # x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
-        x = x @ self.text_projection
+        x = x @ self.text_projection # 返回所有 token [B, 77, output_dim]
 
         return x
 
@@ -445,22 +462,79 @@ class CLIP(nn.Module):
     
     def load_param(self, state_dict):
         # 将pretrained_dict里不属于model_dict的键剔除掉
-        param_dict =  {k: v for k, v in state_dict.items() if k in self.state_dict()}
+        # param_dict =  {k: v for k, v in state_dict.items() if k in self.state_dict()}
 
-        if 'model' in param_dict:
-            param_dict = param_dict['model']
-        if 'state_dict' in param_dict:
-            param_dict = param_dict['state_dict']
-        for k, v in param_dict.items():
-            if k == 'visual.positional_embedding' and v.shape != self.visual.positional_embedding.shape:
-                v = resize_pos_embed(v, self.visual.positional_embedding, self.visual.num_y, self.visual.num_x)
-            elif k == 'positional_embedding' and v.shape != self.positional_embedding.shape:
-                v = resize_text_pos_embed(v, self.context_length)
-            try:
-                self.state_dict()[k].copy_(v)
-            except:
-                print(f'===========================ERROR occur in copy {k}, {v.shape}=========================')
-                print('shape do not match in k :{}: param_dict{} vs self.state_dict(){}'.format(k, v.shape, self.state_dict()[k].shape))
+        # if 'model' in param_dict:
+        #     param_dict = param_dict['model']
+        # if 'state_dict' in param_dict:
+        #     param_dict = param_dict['state_dict']
+        # for k, v in param_dict.items():
+        #     if k == 'visual.positional_embedding' and v.shape != self.visual.positional_embedding.shape:
+        #         v = resize_pos_embed(v, self.visual.positional_embedding, self.visual.num_y, self.visual.num_x)
+        #     elif k == 'positional_embedding' and v.shape != self.positional_embedding.shape:
+        #         v = resize_text_pos_embed(v, self.context_length)
+        #     try:
+        #         self.state_dict()[k].copy_(v)
+        #     except:
+        #         print(f'===========================ERROR occur in copy {k}, {v.shape}=========================')
+        #         print('shape do not match in k :{}: param_dict{} vs self.state_dict(){}'.format(k, v.shape, self.state_dict()[k].shape))
+        # 清理 state_dict
+        if 'model' in state_dict:
+            state_dict = state_dict['model']
+        if 'state_dict' in state_dict:
+            state_dict = state_dict['state_dict']
+
+        # 获取当前模型的 state_dict
+        model_dict = self.state_dict()
+        
+        # 创建一个新的 state_dict，用于安全加载
+        new_state_dict = {}
+
+        # 遍历当前模型的 *所有* key
+        for k, v in model_dict.items():
+            if k in state_dict:
+                # --- 键在预训练模型中存在 ---
+                v_pretrained = state_dict[k]
+                
+                # 1. 特殊处理：ViT 位置编码 (形状不匹配)
+                if k == 'visual.positional_embedding' and v_pretrained.shape != v.shape:
+                    v_pretrained = resize_pos_embed(v_pretrained, v, self.visual.num_y, self.visual.num_x)
+                
+                # 2. 特殊处理：Text 位置编码 (如果 context_length 不同)
+                elif k == 'positional_embedding' and v_pretrained.shape != v.shape:
+                    print(f"Original text positional embedding shape: {v_pretrained.shape}")
+                    print(f"Target text positional embedding shape: {v.shape}")
+                    v_pretrained = resize_text_pos_embed(v_pretrained, self.context_length)
+                    print(f"Resized text positional embedding to {v_pretrained.shape}")
+                
+                # 检查形状是否最终匹配
+                if v_pretrained.shape == v.shape:
+                    new_state_dict[k] = v_pretrained
+                else:
+                    print(f"Warning: Shape mismatch for {k}. Checkpoint: {v_pretrained.shape}, Model: {v.shape}. Skipping.")
+
+
+
+
+            # --- 新增逻辑：处理2个ViT CLS token的加载 ---
+            # elif k == 'visual.class_embedding_inst':
+            #     if 'visual.class_embedding' in state_dict:
+            #         print("Loading pretrained 'visual.class_embedding' -> 'visual.class_embedding_inst'")
+            #         new_state_dict[k] = state_dict['visual.class_embedding']
+            #     else:
+            #         print(f"Warning: {k} not in checkpoint. Using random init.")
+            
+            # elif k == 'visual.class_embedding_id':
+            #     if 'visual.class_embedding' in state_dict:
+            #         print("Loading pretrained 'visual.class_embedding' -> 'visual.class_embedding_id'")
+            #         new_state_dict[k] = state_dict['visual.class_embedding'] # 再次使用旧的CLS token
+            #     else:
+            #         print(f"Warning: {k} not in checkpoint. Using random init.")
+
+        # 使用 strict=False 安全加载
+        # 这将只加载 new_state_dict 中存在的键
+        print(f"Loading {len(new_state_dict)} / {len(model_dict)} parameters from checkpoint.")
+        self.load_state_dict(new_state_dict, strict=False)
     
 
 
@@ -480,6 +554,38 @@ def resize_pos_embed(posemb, posemb_new, hight, width):
     posemb = torch.cat([posemb_token, posemb_grid], dim=1)
     return posemb.squeeze(0)
 
+def resize_text_pos_embed(posemb, context_length):
+    """
+    Resize text positional embedding when context_length changes
+    Args:
+        posemb: original positional embedding [77, dim]
+        context_length: target context length (e.g., 168)
+    Returns:
+        resized positional embedding [context_length, dim]
+    """
+    old_length = posemb.shape[0]
+    
+    if old_length == context_length:
+        return posemb
+    
+    print(f'Resizing text positional embedding from {old_length} to {context_length}')
+    
+    # 使用线性插值扩展位置编码
+    posemb = posemb.unsqueeze(0).unsqueeze(0)  # [1, 1, old_length, dim]
+    posemb = posemb.permute(0, 3, 1, 2)  # [1, dim, 1, old_length]
+    
+    # 使用 linear 插值（对于序列数据比 bilinear 更合适）
+    posemb = F.interpolate(
+        posemb, 
+        size=(1, context_length), 
+        mode='bilinear',
+        align_corners=False
+    )
+    
+    posemb = posemb.permute(0, 2, 3, 1)  # [1, 1, context_length, dim]
+    posemb = posemb.squeeze(0).squeeze(0)  # [context_length, dim]
+    
+    return posemb
 
 def convert_weights(model: nn.Module):
     """Convert applicable model parameters to fp16"""
@@ -505,7 +611,7 @@ def convert_weights(model: nn.Module):
     model.apply(_convert_weights_to_fp16)
 
 
-def build_CLIP_from_openai_pretrained(name: str, image_size: Union[int, Tuple[int, int]], stride_size: int, jit: bool = False, download_root: str = None):
+def build_CLIP_from_openai_pretrained(name: str, image_size: Union[int, Tuple[int, int]], stride_size: int, jit: bool = False, download_root: str = None, text_length: int = None):
     """Load a CLIP model
 
     Parameters
@@ -565,7 +671,13 @@ def build_CLIP_from_openai_pretrained(name: str, image_size: Union[int, Tuple[in
         image_resolution = output_width * 32
 
     embed_dim = state_dict["text_projection"].shape[1]
-    context_length = state_dict["positional_embedding"].shape[0]
+
+    if text_length is not None and text_length != 77:
+        context_length = text_length
+        logger.info(f"Using custom text_length: {text_length}")
+    else:
+        context_length = state_dict["positional_embedding"].shape[0]  # 默认 77
+   
     vocab_size = state_dict["token_embedding.weight"].shape[0]
     transformer_width = state_dict["ln_final.weight"].shape[0]
     transformer_heads = transformer_width // 64
@@ -577,6 +689,7 @@ def build_CLIP_from_openai_pretrained(name: str, image_size: Union[int, Tuple[in
         'vision_layers': vision_layers, 
         'vision_width': vision_width, 
         'vision_patch_size': vision_patch_size,
+        'context_length': context_length,  # 使用修改后的 context_length
         'context_length': context_length, 
         'vocab_size': vocab_size, 
         'transformer_width': transformer_width, 

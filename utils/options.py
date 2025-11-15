@@ -12,11 +12,13 @@ def get_args():
     parser.add_argument("--val_dataset", default="test") # use val set when evaluate, if test use test set
     parser.add_argument("--resume", default=False, action='store_true')
     parser.add_argument("--resume_ckpt_file", default="", help='resume from ...')
+    parser.add_argument("--seed", type=int, default=1, help="random seed for reproducibility")
 
     ######################## model general settings ########################
     parser.add_argument("--pretrain_choice", default='ViT-B/16') # whether use pretrained model
     parser.add_argument("--temperature", type=float, default=0.02, help="initial temperature value, if 0, don't use temperature")
     parser.add_argument("--img_aug", default=False, action='store_true')
+    parser.add_argument("--txt_aug", default=False, action='store_true')
 
     ## cross modal transfomer setting
     parser.add_argument("--cmt_depth", type=int, default=4, help="cross modal transformer self attn layers")
@@ -37,8 +39,10 @@ def get_args():
     parser.add_argument("--id_pred_layers", type=int, default=1, help="MLP layers for identity predictor head (per modality)")
     parser.add_argument("--reg_loss_weight", type=float, default=0.05, help="weight for reconstruction regularization loss")
     parser.add_argument("--reg_loss_type", type=str, default="mse", choices=["mse", "cosine", "huber"], help="type of reconstruction regularization loss")
-    parser.add_argument("--inference_fusion", type=str, default="align", choices=["align", "id", "concat"], help="which feature to use at inference")
-    parser.add_argument("--fusion_alpha", type=float, default=0.6, help="weight for alignment feature when inference_fusion=concat; id weight is 1-alpha")
+    parser.add_argument("--inference_fusion", type=str, default="align", choices=["align", "id", "fuse"], help="which feature to use at inference")
+    parser.add_argument("--fusion_alpha", type=float, default=0.5, help="weight for alignment feature when inference_fusion=concat; id weight is 1-alpha")
+    parser.add_argument("--triplet_loss_weight", type=float, default=1.0, help="triplet loss weight")
+    parser.add_argument("--triplet_margin", type=float, default=0.3, help="margin for triplet loss")
     
     ######################## vison trainsformer settings ########################
     parser.add_argument("--img_size", type=tuple, default=(384, 128))
@@ -78,6 +82,11 @@ def get_args():
     parser.add_argument("--test_batch_size", type=int, default=512)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--test", dest='training', default=True, action='store_false')
+
+
+    # 特征融合相关参数
+    parser.add_argument('--use_fusion_gate', type=bool, default=True, help='是否使用门控机制进行融合')
+    # parser.add_argument('--fusion_alpha', type=float, default=0.5, help='简单加权融合时的权重（备用）')
 
     args = parser.parse_args()
 

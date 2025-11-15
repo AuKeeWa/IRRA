@@ -85,7 +85,9 @@ def build_dataloader(args, tranforms=None):
         if args.MLM:
             train_set = ImageTextMLMDataset(dataset.train,
                                      train_transforms,
-                                     text_length=args.text_length)
+                                     text_length=args.text_length,
+                                     txt_aug=args.txt_aug  # 传递参数
+                                     )
         else:
             train_set = ImageTextDataset(dataset.train,
                                      train_transforms,

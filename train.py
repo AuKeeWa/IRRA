@@ -29,7 +29,8 @@ def set_seed(seed=0):
 
 if __name__ == '__main__':
     args = get_args()
-    set_seed(1+get_rank())
+    # set_seed(1+get_rank())
+    set_seed(args.seed + get_rank())  # 使用命令行参数
     name = args.name
 
     num_gpus = int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
@@ -47,6 +48,9 @@ if __name__ == '__main__':
     logger.info("Using {} GPUs".format(num_gpus))
     logger.info(str(args).replace(',', '\n'))
     save_train_configs(args.output_dir, args)
+
+    if get_rank() == 0:
+        logger.info(f'Random seed: {args.seed}')
 
     # get image-text pair datasets dataloader
     train_loader, val_img_loader, val_txt_loader, num_classes = build_dataloader(args)

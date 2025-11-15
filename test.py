@@ -22,6 +22,10 @@ if __name__ == '__main__':
     args = parser.parse_args()
     args = load_train_configs(args.config_file)
 
+    # args.fusion_alpha = 0.8
+    args.inference_fusion = 'fuse'
+    # args.inference_fusion = 'align'
+
     args.training = False
     logger = setup_logger('IRRA', save_dir=args.output_dir, if_train=args.training)
     logger.info(args)
