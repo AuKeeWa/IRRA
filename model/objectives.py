@@ -71,13 +71,15 @@ def compute_itc(image_features, text_features, logit_scale):
     return loss
 
 
-def compute_id(image_logits, text_logits, labels):
+def compute_id(image_logits, text_logits, labels, temperature=1.0, label_smoothing=0.1):
     """
     Instance loss proposed at http://arxiv.org/abs/1711.05535
     """
-    criterion = nn.CrossEntropyLoss(reduction="mean", label_smoothing=0.1)
-    # criterion = nn.CrossEntropyLoss(reduction="mean", label_smoothing=0.05)
-    # criterion = nn.CrossEntropyLoss(reduction="mean", label_smoothing=0.15)
+    if temperature != 1.0:
+        image_logits = image_logits / temperature
+        text_logits = text_logits / temperature
+
+    criterion = nn.CrossEntropyLoss(reduction="mean", label_smoothing=label_smoothing)
 
     loss = criterion(image_logits, labels) + criterion(text_logits, labels)
     

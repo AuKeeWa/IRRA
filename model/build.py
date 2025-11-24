@@ -514,7 +514,12 @@ class IRRA(nn.Module):
             # ID分类损失
             image_logits = self.classifier(id_i_feats)  # 使用ID空间特征
             text_logits = self.classifier(id_t_feats)   # 使用ID空间特征
-            ret.update({'id_loss':objectives.compute_id(image_logits, text_logits, batch['pids'])*self.args.id_loss_weight})
+
+            id_temperature = getattr(self.args, 'id_temperature', 2.0)
+            id_label_smoothing = getattr(self.args, 'id_label_smoothing', 0.1)
+
+
+            ret.update({'id_loss':objectives.compute_id(image_logits, text_logits, batch['pids'], temperature=id_temperature, label_smoothing=id_label_smoothing)*self.args.id_loss_weight})
 
             if 'triplet' in self.current_task: # 检查是否在 loss_names 中启用了 triplet
                 triplet_loss = objectives.compute_triplet(
