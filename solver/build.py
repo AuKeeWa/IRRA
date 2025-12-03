@@ -18,9 +18,22 @@ def build_optimizer(args, model):
         if "cross" in key:
             # use large learning rate for random initialized cross modal module
             lr =  args.lr * args.lr_factor # default 5.0
+        
         if "bias" in key:
             lr = args.lr * args.bias_lr_factor
             weight_decay = args.weight_decay_bias
+        # Gate Projection（最高优先级）
+        if "gate_proj" in key:
+            lr = args.lr * args.lr_factor
+            # ✅ 打印不同模块的 gate
+            if "visual.transformer" in key:
+                print(f"🔥 Vision Gate: {key}, lr={lr:.2e}")
+            elif "transformer.resblocks" in key and "cross" not in key:
+                print(f"🔥 Text Gate: {key}, lr={lr:.2e}")
+            elif "cross" in key:
+                print(f"🔥 Cross-Modal Gate: {key}, lr={lr:.2e}")
+            elif "id_gate" in key:
+                print(f"🔥 ID Branch Gate: {key}, lr={lr:.2e}")
         # 分类器、MLM头、ID相关模块
         # if "classifier" in key or "mlm_head" in key or "text_id_" in key or "image_id_" in key or "fusion_" in key:
         #     lr = args.lr * args.lr_factor
@@ -59,26 +72,32 @@ def build_optimizer(args, model):
     else:
         NotImplementedError
 
-    print("\n=== ID Module Learning Rate Assignment ===")
+    print("\n=== Learning Rate Assignment Summary ===")
+    print(f"Base LR: {args.lr:.2e}")
+    print(f"LR Factor: {args.lr_factor}")
+    print(f"Bias LR Factor: {args.bias_lr_factor}")
+    print(f"High LR: {args.lr * args.lr_factor:.2e}")
+
+    print("\n--- ID Module Assignment (including ID gates) ---")
     for key, value in model.named_parameters():
         if not value.requires_grad:
             continue
-        
-        # 检查是否匹配高学习率规则
-        is_high_lr = ("classifier" in key or 
-                    "mlm_head" in key or 
-                    "text_id_" in key or 
-                    "image_id_" in key or 
-                    "id_pooling" in key or 
-                    "id_query" in key or 
-                    "id_attention" in key or 
-                    "id_layernorm" in key or 
-                    "shared_id_" in key or 
-                    "fusion_" in key)
-        
-        if is_high_lr and ("id_" in key or "pooling" in key):
-            lr = args.lr * args.lr_factor
-            print(f"✅ High LR ({lr:.2e}): {key}")
+        # 显示所有ID相关参数（包括门控）
+        if ("text_id_" in key or "image_id_" in key or 
+            "id_query" in key or "id_attention" in key or 
+            "id_layernorm" in key):
+            actual_lr = args.lr * args.bias_lr_factor if "bias" in key else args.lr * args.lr_factor
+            gate_mark = "🔥 [Gate]" if "gate_proj" in key else "✅"
+            print(f"{gate_mark} LR={actual_lr:.2e}: {key}")
+
+    print("\n--- CMT Gate Assignment ---")
+    for key, value in model.named_parameters():
+        if not value.requires_grad:
+            continue
+        # 只显示CMT的gate_proj（排除ID门控）
+        if "gate_proj" in key and "cross_modal_transformer" in key:
+            actual_lr = args.lr * args.bias_lr_factor if "bias" in key else args.lr * args.lr_factor
+            print(f"🔥 LR={actual_lr:.2e}: {key}")
 
     print("=" * 50)
 

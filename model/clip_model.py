@@ -228,7 +228,7 @@ class QuickGELU(nn.Module):
 
 
 class ResidualAttentionBlock(nn.Module):
-    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None):
+    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, use_gate: bool = False):
         super().__init__()
 
         self.attn = nn.MultiheadAttention(d_model, n_head)
@@ -241,9 +241,40 @@ class ResidualAttentionBlock(nn.Module):
         self.ln_2 = LayerNorm(d_model)
         self.attn_mask = attn_mask
 
+        # 新增：Gated Attention 支持
+        self.use_gate = use_gate
+        if self.use_gate:
+            # Headwise Gate: 为每个 head 生成一个门控标量
+            self.gate_proj = nn.Linear(d_model, n_head)
+            self.num_heads = n_head
+            self.head_dim = d_model // n_head
+
     def attention(self, x: torch.Tensor):
         self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
-        return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
+        # 标准 Attention 输出
+        attn_output = self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
+
+        # 新增：应用 Gated Attention
+        if self.use_gate:
+            # x: [L, N, D] (seq_len, batch, dim)
+            # 计算门控分数（基于输入 query）
+            gate_score = self. gate_proj(x)  # [L, N, num_heads]
+            gate_score = torch.sigmoid(gate_score)  # sigmoid 激活到 [0, 1]
+            
+            # Reshape for headwise gating
+            L, N, num_heads = gate_score.shape
+            gate_score = gate_score.unsqueeze(-1)  # [L, N, num_heads, 1]
+            
+            # Reshape attn_output: [L, N, D] -> [L, N, num_heads, head_dim]
+            attn_output = attn_output.view(L, N, num_heads, self.head_dim)
+            
+            # 逐头门控
+            attn_output = attn_output * gate_score
+            
+            # Reshape 回来: [L, N, num_heads, head_dim] -> [L, N, D]
+            attn_output = attn_output.view(L, N, -1)
+
+        return attn_output
 
     def forward(self, x: torch.Tensor):
         x = x + self.attention(self.ln_1(x))
@@ -252,18 +283,19 @@ class ResidualAttentionBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None):
+    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None, use_gate: bool = False):
         super().__init__()
         self.width = width
         self.layers = layers
-        self.resblocks = nn.Sequential(*[ResidualAttentionBlock(width, heads, attn_mask) for _ in range(layers)])
+        self.use_gate = use_gate  # 新增：保存门控开关
+        self.resblocks = nn.Sequential(*[ResidualAttentionBlock(width, heads, attn_mask, use_gate=use_gate) for _ in range(layers)])
 
     def forward(self, x: torch.Tensor):
         return self.resblocks(x)
 
 
 class VisionTransformer(nn.Module):
-    def __init__(self, input_resolution: Tuple[int, int], patch_size: int, stride_size: int, width: int, layers: int, heads: int, output_dim: int):
+    def __init__(self, input_resolution: Tuple[int, int], patch_size: int, stride_size: int, width: int, layers: int, heads: int, output_dim: int, use_gate: bool = False):
         super().__init__()
         self.input_resolution = input_resolution # (384, 128)
         self.num_x = (input_resolution[1] - patch_size) // stride_size + 1
@@ -285,7 +317,7 @@ class VisionTransformer(nn.Module):
 
         self.ln_pre = LayerNorm(width)
 
-        self.transformer = Transformer(width, layers, heads)
+        self.transformer = Transformer(width, layers, heads, use_gate=use_gate)
 
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
@@ -337,7 +369,9 @@ class CLIP(nn.Module):
                  vocab_size: int,
                  transformer_width: int,
                  transformer_heads: int,
-                 transformer_layers: int
+                 transformer_layers: int,
+                 use_vision_gate=False,
+                 use_text_gate=False
                  ):
         super().__init__()
 
@@ -361,14 +395,16 @@ class CLIP(nn.Module):
                 width=vision_width,
                 layers=vision_layers,
                 heads=vision_heads,
-                output_dim=embed_dim
+                output_dim=embed_dim,
+                use_gate=use_vision_gate
             )
 
         self.transformer = Transformer(
             width=transformer_width,
             layers=transformer_layers,
             heads=transformer_heads,
-            attn_mask=self.build_attention_mask()
+            attn_mask=self.build_attention_mask(),
+            use_gate=use_text_gate
         )
 
         self.vocab_size = vocab_size
@@ -611,7 +647,7 @@ def convert_weights(model: nn.Module):
     model.apply(_convert_weights_to_fp16)
 
 
-def build_CLIP_from_openai_pretrained(name: str, image_size: Union[int, Tuple[int, int]], stride_size: int, jit: bool = False, download_root: str = None, text_length: int = None):
+def build_CLIP_from_openai_pretrained(name: str, image_size: Union[int, Tuple[int, int]], stride_size: int, jit: bool = False, download_root: str = None, text_length: int = None, use_vision_gate: bool = False, use_text_gate: bool = False):
     """Load a CLIP model
 
     Parameters
@@ -690,11 +726,12 @@ def build_CLIP_from_openai_pretrained(name: str, image_size: Union[int, Tuple[in
         'vision_width': vision_width, 
         'vision_patch_size': vision_patch_size,
         'context_length': context_length,  # 使用修改后的 context_length
-        'context_length': context_length, 
         'vocab_size': vocab_size, 
         'transformer_width': transformer_width, 
         'transformer_heads': transformer_heads, 
-        'transformer_layers': transformer_layers
+        'transformer_layers': transformer_layers,
+        'use_vision_gate': use_vision_gate,
+        'use_text_gate': use_text_gate
     }
 
 

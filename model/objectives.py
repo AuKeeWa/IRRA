@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def compute_sdm(image_fetures, text_fetures, pid, logit_scale, image_id=None, factor=0.3, epsilon=1e-8):
+def compute_sdm(image_fetures, text_fetures, pid, logit_scale, image_id=None, factor=0.3, epsilon=1e-8, use_weight=False):
     """
     Similarity Distribution Matching
     """
@@ -36,7 +36,34 @@ def compute_sdm(image_fetures, text_fetures, pid, logit_scale, image_id=None, fa
     i2t_loss = i2t_pred * (F.log_softmax(image_proj_text, dim=1) - torch.log(labels_distribute + epsilon))
     t2i_pred = F.softmax(text_proj_image, dim=1)
     t2i_loss = t2i_pred * (F.log_softmax(text_proj_image, dim=1) - torch.log(labels_distribute + epsilon))
-    loss = torch.mean(torch.sum(i2t_loss, dim=1)) + torch.mean(torch.sum(t2i_loss, dim=1))
+
+    # === 新增 A-SDM 加权逻辑 ===
+    if use_weight:
+        # 1. 找到预测最大值的索引和真实标签索引
+        i2t_sim_max_idx = image_proj_text.argmax(dim=1)
+        t2i_sim_max_idx = text_proj_image.argmax(dim=1)
+        label_max_idx = labels_distribute.argmax(dim=1)
+
+        # 2. 计算 Image-to-Text 权重
+        i2t_mask = i2t_sim_max_idx != label_max_idx  # 找出预测错误的样本
+        # 计算"错误预测值"与"正确标签值"的相似度差
+        diff_i2t = i2t_cosine_theta[torch.arange(batch_size), i2t_sim_max_idx] - i2t_cosine_theta[torch.arange(batch_size), label_max_idx]
+        diff_i2t[~i2t_mask] = 0 
+        diff_i2t = diff_i2t * 0.1 + 1 # 线性缩放权重
+        # diff_i2t = diff_i2t * 10 + 1 # 线性缩放权重
+
+        # 3. 计算 Text-to-Image 权重
+        t2i_mask = t2i_sim_max_idx != label_max_idx
+        diff_t2i = t2i_cosine_theta[torch.arange(batch_size), t2i_sim_max_idx] - t2i_cosine_theta[torch.arange(batch_size), label_max_idx]
+        diff_t2i[~t2i_mask] = 0
+        diff_t2i = diff_t2i * 0.1 + 1
+        # diff_t2i = diff_t2i * 10 + 1
+
+        # 4. 加权求和
+        loss = torch.mean(diff_i2t * torch.sum(i2t_loss, dim=1)) + torch.mean(diff_t2i * torch.sum(t2i_loss, dim=1))
+    else:
+        # 原版 SDM 逻辑
+        loss = torch.mean(torch.sum(i2t_loss, dim=1)) + torch.mean(torch.sum(t2i_loss, dim=1))
 
     return loss
 

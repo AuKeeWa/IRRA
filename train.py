@@ -74,8 +74,18 @@ if __name__ == '__main__':
     evaluator = Evaluator(val_img_loader, val_txt_loader)
 
     start_epoch = 1
-    if args.resume:
+    if args.pretrain_ckpt_file:
+        if not os.path.exists(args.pretrain_ckpt_file):
+            raise FileNotFoundError(f"Pretrain checkpoint file {args.pretrain_ckpt_file} does not exist.")
+        # 模式1: 只加载预训练权重（用于迁移学习）
+        logger.info(f"Loading pretrained weights from {args.pretrain_ckpt_file}")
+        checkpointer.load(args.pretrain_ckpt_file)
+        logger.info("Pretrained weights loaded. Starting training from epoch 1.")
+    elif args.resume:
+        # 模式2: 完整恢复训练（模型 + 优化器 + 调度器）
+        logger.info(f"Resuming training from {args.resume_ckpt_file}")
         checkpoint = checkpointer.resume(args.resume_ckpt_file)
         start_epoch = checkpoint['epoch']
+        logger.info(f"Training resumed from epoch {start_epoch}")
 
     do_train(start_epoch, args, model, train_loader, evaluator, optimizer, scheduler, checkpointer)

@@ -12,6 +12,7 @@ def get_args():
     parser.add_argument("--val_dataset", default="test") # use val set when evaluate, if test use test set
     parser.add_argument("--resume", default=False, action='store_true')
     parser.add_argument("--resume_ckpt_file", default="", help='resume from ...')
+    parser.add_argument("--pretrain_ckpt_file", default="", help='load pretrained weights (model only)')
     parser.add_argument("--seed", type=int, default=1, help="random seed for reproducibility")
 
     ######################## model general settings ########################
@@ -26,6 +27,11 @@ def get_args():
     parser.add_argument("--masked_token_unchanged_rate", type=float, default=0.1, help="masked token unchanged rate")
     parser.add_argument("--lr_factor", type=float, default=5.0, help="lr factor for random init self implement module")
     parser.add_argument("--MLM", default=False, action='store_true', help="whether to use Mask Language Modeling dataset")
+    # 新增：门控注意力机制
+    parser.add_argument("--use_gated_cmt", default=False, action='store_true', help="whether to use gated attention in cross-modal transformer")
+    parser.add_argument("--use_vision_gate", default=False, action='store_true', help="whether to use gated attention in vision transformer")
+    parser.add_argument("--use_text_gate", default=False, action='store_true', help="whether to use gated attention in text transformer")
+    parser.add_argument("--use_id_gate", default=False, action='store_true', help="whether to use gated attention in ID branch")
 
     ######################## loss settings ########################
     parser.add_argument("--loss_names", default='sdm+id+mlm', help="which loss to use ['mlm', 'cmpm', 'id', 'itc', 'sdm']")
@@ -33,6 +39,7 @@ def get_args():
     parser.add_argument("--id_loss_weight", type=float, default=1.0, help="id loss weight")
     parser.add_argument("--id_label_smoothing", type=float, default=0.1, help="label smoothing for ID loss")
     parser.add_argument("--id_temperature", type=float, default=1.0, help="temperature scaling for ID loss")
+    parser.add_argument("--sdm_loss_use_weight", default=False, action='store_true', help="whether to use A-SDM (Adaptive SDM) loss")
     # decoupling options
     parser.add_argument("--decouple", default=False, action='store_true', help="enable decoupled heads: alignment/id tasks")
     parser.add_argument("--id_head_type", type=str, default="mlp", choices=["mlp", "transformer", "hybrid"], help="architecture type for ID head: mlp (simple), transformer (powerful), hybrid (balanced)")
@@ -42,7 +49,7 @@ def get_args():
     parser.add_argument("--reg_loss_weight", type=float, default=0.05, help="weight for reconstruction regularization loss")
     parser.add_argument("--reg_loss_type", type=str, default="mse", choices=["mse", "cosine", "huber"], help="type of reconstruction regularization loss")
     parser.add_argument("--inference_fusion", type=str, default="align", choices=["align", "id", "fuse"], help="which feature to use at inference")
-    parser.add_argument("--fusion_alpha", type=float, default=0.5, help="weight for alignment feature when inference_fusion=concat; id weight is 1-alpha")
+    # parser.add_argument("--fusion_alpha", type=float, default=0.5, help="weight for alignment feature when inference_fusion=concat; id weight is 1-alpha")
     parser.add_argument("--triplet_loss_weight", type=float, default=1.0, help="triplet loss weight")
     parser.add_argument("--triplet_margin", type=float, default=0.3, help="margin for triplet loss")
     

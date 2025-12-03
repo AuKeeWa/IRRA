@@ -15,7 +15,7 @@ class IRRA(nn.Module):
         self.num_classes = num_classes
         self._set_task()
 
-        self.base_model, base_cfg = build_CLIP_from_openai_pretrained(args.pretrain_choice, args.img_size, args.stride_size, text_length=args.text_length)
+        self.base_model, base_cfg = build_CLIP_from_openai_pretrained(args.pretrain_choice, args.img_size, args.stride_size, text_length=args.text_length, use_vision_gate=args.use_vision_gate, use_text_gate=args.use_text_gate)
         self.embed_dim = base_cfg['embed_dim']
 
         self.context_length = base_cfg['context_length']
@@ -151,7 +151,7 @@ class IRRA(nn.Module):
             # LayerNorm 用于稳定训练
             self.text_id_layernorm = LayerNorm(self.embed_dim)
 
-            # 1. 在 __init__ 中添加新的 图像 注意力池化模块
+            # 2. 在 __init__ 中添加新的 图像 注意力池化模块
             # 可学习的 "ID Query" 向量 (图像侧)
             self.image_id_query = nn.Parameter(torch.randn(1, 1, self.embed_dim)) # [1, 1, D]
             # MHA (Q = image_id_query, K = image_patches, V = image_patches)
@@ -162,15 +162,35 @@ class IRRA(nn.Module):
             )
             self.image_id_layernorm = LayerNorm(self.embed_dim)
 
+            # ID门控（headwise）
+            use_id_gate = getattr(args, 'use_id_gate', False)
+            self.use_id_gate = use_id_gate
+            if use_id_gate:
+                num_heads = self.embed_dim // 64
+                self.text_id_gate_proj = nn.Linear(self.embed_dim, num_heads)
+                self.image_id_gate_proj = nn.Linear(self.embed_dim, num_heads)
+                # 初始化为接近1（类似CMT门控）
+                nn.init.constant_(self.text_id_gate_proj.weight, 0.0)
+                nn.init.constant_(self.text_id_gate_proj.bias, 3.0)
+                nn.init.constant_(self.image_id_gate_proj.weight, 0.0)
+                nn.init.constant_(self.image_id_gate_proj.bias, 3.0)
+
+                # 新增：可选的残差权重（固定为0.5，也可以设为可学习参数）
+                self.id_gate_residual_alpha = 0.5
+
 
         if 'mlm' in args.loss_names:
             self.cross_attn = nn.MultiheadAttention(self.embed_dim,
                                                     self.embed_dim // 64,
                                                     batch_first=True)
+            # 新增：添加门控支持
+            use_gated_cmt = getattr(args, 'use_gated_cmt', False)  # 从 args 读取配置
+    
+        
             self.cross_modal_transformer = Transformer(width=self.embed_dim,
                                                        layers=args.cmt_depth,
-                                                       heads=self.embed_dim //
-                                                       64)
+                                                       heads=self.embed_dim // 64,
+                                                       use_gate=use_gated_cmt)
             scale = self.cross_modal_transformer.width**-0.5
             
             self.ln_pre_t = LayerNorm(self.embed_dim)
@@ -186,6 +206,12 @@ class IRRA(nn.Module):
                 nn.init.normal_(block.mlp.c_fc.weight, std=fc_std)
                 nn.init.normal_(block.mlp.c_proj.weight, std=proj_std)
 
+            # 新增：初始化 gate_proj（如果启用门控）
+            if use_gated_cmt and hasattr(block, 'gate_proj'):
+                # 初始化门控层，使其初始接近 1（即初始时不抑制信息）
+                nn.init. constant_(block.gate_proj.weight, 0.0)
+                nn.init.constant_(block.gate_proj.bias, 3.0)  # sigmoid(1.0) ≈ 0.73
+
             # init cross attn
             nn.init.normal_(self.cross_attn.in_proj_weight, std=attn_std)
             nn.init.normal_(self.cross_attn.out_proj.weight, std=proj_std)
@@ -198,6 +224,15 @@ class IRRA(nn.Module):
             # init mlm head
             nn.init.normal_(self.mlm_head.dense.weight, std=fc_std)
             nn.init.normal_(self.mlm_head.fc.weight, std=proj_std)
+
+
+            # 验证打印
+            if use_gated_cmt:
+                print("✅ Gated Attention ENABLED in Cross-Modal Transformer")
+                print(f"   - Number of layers: {args.cmt_depth}")
+                print(f"   - Number of heads per layer: {self.embed_dim // 64}")
+            else:
+                print("❌ Gated Attention DISABLED (using standard attention)")
 
 
 
@@ -265,6 +300,31 @@ class IRRA(nn.Module):
             key_padding_mask=mask  # [B,L] bool
         )  # [B,1,D]
 
+        # 修改：应用残差门控
+        if self.use_id_gate:
+            # 保存原始输出（用于残差连接）
+            attn_output_orig = attn_output.clone()
+            
+            # 基于query计算门控分数（headwise）
+            gate_score = self.text_id_gate_proj(query)  # [B, 1, num_heads]
+            gate_score = torch.sigmoid(gate_score)  # [0, 1]
+            
+            # Reshape attn_output: [B, 1, D] -> [B, 1, num_heads, head_dim]
+            num_heads = self.embed_dim // 64
+            head_dim = self.embed_dim // num_heads
+            attn_output = attn_output.view(B, 1, num_heads, head_dim)
+            
+            # 逐头门控
+            gate_score_expanded = gate_score.unsqueeze(-1)  # [B, 1, num_heads, 1]
+            attn_output_gated = attn_output * gate_score_expanded
+            
+            # 🔥 关键：残差连接（混合原始输出和门控输出）
+            alpha = self.id_gate_residual_alpha  # 0.5
+            attn_output = alpha * attn_output + (1 - alpha) * attn_output_gated
+            
+            # Reshape回来: [B, 1, num_heads, head_dim] -> [B, 1, D]
+            attn_output = attn_output.view(B, 1, -1)
+
         # 5) 后处理
         id_feat = attn_output.squeeze(1)  # [B,D]
         id_feat = self.text_id_layernorm(id_feat)
@@ -277,6 +337,7 @@ class IRRA(nn.Module):
         image_feats: [B, N_patches + 1, D] (index 0 是 CLS)
         """
         # 1. 准备 Query
+        B = image_feats.shape[0]
         query = self.image_id_query.expand(image_feats.shape[0], -1, -1) # [B, 1, D]
 
         # 2. 准备 Key 和 Value (K=V)
@@ -292,6 +353,27 @@ class IRRA(nn.Module):
             key_padding_mask=None
         ) # [B, 1, D]
         
+        # 修改：应用残差门控
+        if self.use_id_gate:
+            # 保存原始输出（用于残差连接）
+            attn_output_orig = attn_output.clone()
+            
+            gate_score = self.image_id_gate_proj(query)  # [B, 1, num_heads]
+            gate_score = torch.sigmoid(gate_score)
+            
+            num_heads = self.embed_dim // 64
+            head_dim = self.embed_dim // num_heads
+            attn_output = attn_output.view(B, 1, num_heads, head_dim)
+            
+            gate_score_expanded = gate_score.unsqueeze(-1)  # [B, 1, num_heads, 1]
+            attn_output_gated = attn_output * gate_score_expanded
+            
+            # 🔥 关键：残差连接（混合原始输出和门控输出）
+            alpha = self.id_gate_residual_alpha  # 0.5
+            attn_output = alpha * attn_output + (1 - alpha) * attn_output_gated
+            
+            attn_output = attn_output.view(B, 1, -1)
+
         # 4. 后处理
         id_feat = attn_output.squeeze(1) # [B, D]
         id_feat = self.image_id_layernorm(id_feat)
@@ -303,6 +385,14 @@ class IRRA(nn.Module):
         loss_names = self.args.loss_names
         self.current_task = [l.strip() for l in loss_names.split('+')]
         print(f'Training Model with {self.current_task} tasks')
+
+        if 'sdm' in self.current_task:
+            use_asdm = getattr(self.args, 'sdm_loss_use_weight', False)
+            if use_asdm:
+                print("\n[INFO] >>> A-SDM (Adaptive SDM) is ENABLED. <<<")
+                print("[INFO] Hard negative mining with weighted loss will be used.\n")
+            else:
+                print("\n[INFO] >>> Standard SDM is used. (A-SDM is DISABLED) <<<\n")
     
     
     def cross_former(self, q, k, v):
@@ -330,7 +420,10 @@ class IRRA(nn.Module):
         
         # 身份 (ID) 特征: Patch tokens 平均池化
         # i_feats_id = torch.mean(x[:, 1:, :], dim=1).float()
-        i_feats_id = self._compute_attention_pooled_image_id(x)
+        if 'id' in self.current_task:
+            i_feats_id = self._compute_attention_pooled_image_id(x)
+        else:
+            i_feats_id = i_feats_inst
 
 
         # 根据评估模式返回特征
@@ -374,8 +467,11 @@ class IRRA(nn.Module):
 
         # 身份 (ID) 特征: Word tokens 掩码平均池化
         # t_feats_sot = self._compute_masked_text_mean(x, text)
-        t_feats_sot = self._compute_attention_pooled_text_id(x, text)
-        id_t_feats_mapped = t_feats_sot
+        if 'id' in self.current_task:
+            t_feats_sot = self._compute_attention_pooled_text_id(x, text)
+            id_t_feats_mapped = t_feats_sot
+        else:
+            id_t_feats_mapped = t_feats_eot
 
         # 4. 根据评估模式返回特征
         mode = getattr(self.args, 'inference_fusion', 'align')
@@ -431,10 +527,15 @@ class IRRA(nn.Module):
         #    - 图像: 使用 Patch tokens 平均池化
         #    - 文本: 使用 Word tokens 掩码平均池化
         # i_feats_id = torch.mean(image_feats[:, 1:, :], dim=1).float() # Image[Patches] mean, 从索引1开始到最后的所有 token
-        i_feats_id = self._compute_attention_pooled_image_id(image_feats)
-        # t_feats_id = self._compute_masked_text_mean(text_feats, caption_ids) # Text[Words] mean
-        t_feats_id = self._compute_attention_pooled_text_id(text_feats, caption_ids)
         
+        # t_feats_id = self._compute_masked_text_mean(text_feats, caption_ids) # Text[Words] mean
+        
+        if 'id' in self.current_task:
+            i_feats_id = self._compute_attention_pooled_image_id(image_feats)
+            t_feats_id = self._compute_attention_pooled_text_id(text_feats, caption_ids)
+        else:
+            i_feats_id = ai_feats
+            t_feats_id = at_feats
 
 
         logit_scale = self.logit_scale
@@ -444,7 +545,17 @@ class IRRA(nn.Module):
             ret.update({'itc_loss': objectives.compute_itc(ai_feats, at_feats, logit_scale)})
         
         if 'sdm' in self.current_task:
-            ret.update({'sdm_loss': objectives.compute_sdm(ai_feats, at_feats, batch['pids'], logit_scale)})
+            # ret.update({'sdm_loss': objectives.compute_sdm(ai_feats, at_feats, batch['pids'], logit_scale)})
+            # 修改后 (建议使用 getattr 设置默认值为 True):
+            ret.update({
+                'sdm_loss': objectives.compute_sdm(
+                    ai_feats, 
+                    at_feats, 
+                    batch['pids'], 
+                    logit_scale, 
+                    use_weight=getattr(self.args, 'sdm_loss_use_weight', False) # 默认关闭 A-SDM
+                )
+            })
 
         if 'cmpm' in self.current_task:
             ret.update({'cmpm_loss': objectives.compute_cmpm(ai_feats, at_feats, batch['pids'])})
